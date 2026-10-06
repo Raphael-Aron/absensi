@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="id"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Absensi Scan NIM</title>
+<style>
+:root{--bg:#f5f6f8;--c:#fff;--t:#1a1d23;--m:#6b7280;--b:#e3e5ea;--ok:#15803d;--warn:#b45309;--err:#b91c1c;--ac:#2563eb}
+@media(prefers-color-scheme:dark){:root{--bg:#14161a;--c:#1e2128;--t:#e8eaee;--m:#9aa1ad;--b:#2c303a;--ok:#4ade80;--warn:#fbbf24;--err:#f87171;--ac:#60a5fa}}
+*{box-sizing:border-box}body{margin:0;font:14px system-ui,sans-serif;background:var(--bg);color:var(--t)}
+main{max-width:1000px;margin:0 auto;padding:16px}
+.bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
+.bar h1{font-size:18px;margin:0 auto 0 0}
+button,select,input{font:inherit;padding:7px 10px;border:1px solid var(--b);border-radius:8px;background:var(--c);color:var(--t)}
+button{cursor:pointer}button.p{background:var(--ac);border-color:var(--ac);color:#fff}
+.card{background:var(--c);border:1px solid var(--b);border-radius:12px;padding:14px;margin-bottom:12px}
+#scan{width:100%;font-size:16px;padding:12px}
+#st{margin-top:10px;padding:10px 12px;border-radius:8px;border:1px solid var(--b);color:var(--m)}
+#st.ok{color:var(--ok);border-color:var(--ok)}#st.warn{color:var(--warn);border-color:var(--warn)}#st.err{color:var(--err);border-color:var(--err)}
+.wrap{overflow-x:auto}table{width:100%;border-collapse:collapse;white-space:nowrap}
+th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--b)}th{color:var(--m);font-weight:500}
+tr.hit td{background:color-mix(in srgb,var(--ok) 15%,transparent)}
+.b{padding:2px 8px;border-radius:99px;border:1px solid var(--b);font-size:12px}
+.Hadir{color:var(--ok)}.Terlambat{color:var(--warn)}.Izin{color:var(--ac)}.TidakHadir{color:var(--err)}
+dialog{border:1px solid var(--b);border-radius:12px;background:var(--c);color:var(--t);width:min(480px,92vw)}
+dialog label{display:block;margin:10px 0 4px;color:var(--m)}dialog input{width:100%}
+</style></head><body><main>
+<div class="bar"><h1>Absensi Scan NIM</h1>
+<select id="sheet" title="Pilih sheet"></select>
+<button id="ref">Refresh</button><button id="cfgb">Pengaturan</button><button id="login" class="p">Login Google</button></div>
+<div class="card"><input id="scan" placeholder="Arahkan kursor di sini lalu scan kartu..." autocomplete="off" autofocus>
+<div id="st">Belum login. Isi Pengaturan lalu klik Login Google.</div></div>
+<div class="card"><div id="sum" style="margin-bottom:8px;color:var(--m)"></div><div class="wrap"><table id="tb"></table></div></div>
+</main>
+<dialog id="dlg"><form method="dialog">
+<b>Pengaturan</b>
+<label>Link Spreadsheet</label><input id="url" placeholder="https://docs.google.com/spreadsheets/d/.../edit">
+<label>Google OAuth Client ID</label><input id="cid" placeholder="xxxx.apps.googleusercontent.com">
+<div style="margin-top:14px;text-align:right"><button class="p" value="ok">Simpan</button></div></form></dialog>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<script>
+const $=s=>document.querySelector(s), esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const cfg=JSON.parse(localStorage.cfg||'{}');
+let token=null,tc,rows=[],hdr=-1,ci={},start=null,hit=null;
+const sid=u=>(u.match(/\/d\/([\w-]+)/)||[,u])[1];
+const col=i=>String.fromCharCode(65+i);
+const idOf=v=>typeof v==='number'?String(Math.round(v)):String(v??'').replace(/\D/g,'');
+const fmt=s=>typeof s==='number'?new Date(Math.round((s-25569)*864e5)).toISOString().slice(0,19).replace('T',' '):'';
+function st(msg,cls=''){const e=$('#st');e.textContent=msg;e.className=cls}
+
+async function api(path,opt={}){
+  if(!token)throw Error('Belum login Google');
+  const r=await fetch('https://sheets.googleapis.com/v4/spreadsheets/'+sid(cfg.url)+path,
+    {...opt,headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'}});
+  if(r.status==401){token=null;$('#login').hidden=false;throw Error('Sesi habis, klik Login Google lagi')}
+  if(!r.ok)throw Error((await r.json()).error?.message||r.status);
+  return r.json();
+}
+function login(){
+  if(!cfg.url||!cfg.cid){$('#dlg').showModal();return}
+  tc=google.accounts.oauth2.initTokenClient({client_id:cfg.cid,scope:'https://www.googleapis.com/auth/spreadsheets',
+    callback:async r=>{if(r.access_token){token=r.access_token;$('#login').hidden=true;await loadSheets()}else st('Login gagal','err')}});
+  tc.requestAccessToken();
+}
+async function loadSheets(){
+  try{
+    const d=await api('?fields=sheets.properties.title');
+    const last=localStorage.sheet,names=d.sheets.map(s=>s.properties.title);
+    $('#sheet').innerHTML=names.map(n=>`<option>${esc(n)}</option>`).join('');
+    $('#sheet').value=names.includes(last)?last:names[names.length-1];
+    await loadData();st('Siap scan.','ok');$('#scan').focus();
+  }catch(e){st(e.message,'err')}
+}
+async function loadData(){
+  if(!token)return;
+  const sh=$('#sheet').value;localStorage.sheet=sh;
+  const d=await api(`/values/${encodeURIComponent(`'${sh}'!A1:P300`)}?valueRenderOption=UNFORMATTED_VALUE`);
+  rows=d.values||[];start=null;
+  hdr=rows.findIndex(r=>r.some(c=>/^id$/i.test(String(c).trim()))&&r.some(c=>/^nama$/i.test(String(c).trim())));
+  if(hdr<0){st('Header (ID, NAMA) tidak ditemukan di sheet ini','err');return}
+  ci={};rows[hdr].forEach((c,i)=>ci[String(c).trim().toLowerCase()]=i);
+  rows.forEach(r=>r.forEach((c,i)=>{if(/jam rapat dimulai/i.test(c)&&typeof r[i+1]==='number')start=r[i+1]}));
+  render();
+}
+function render(){
+  const keys=['no.','nama','jabatan','jam kehadiran','keterangan','telat (menit)','denda'];
+  const body=rows.slice(hdr+1).map((r,i)=>({r,n:hdr+2+i})).filter(x=>idOf(x.r[ci.id]));
+  let h=0;
+  $('#tb').innerHTML='<tr>'+keys.map(k=>`<th>${esc(rows[hdr][ci[k]]??k)}</th>`).join('')+'</tr>'+body.map(({r,n})=>{
+    const k=r[ci.keterangan];if(k)h++;
+    return `<tr class="${hit===n?'hit':''}">`+keys.map(key=>{
+      const v=r[ci[key]];
+      if(key==='jam kehadiran')return `<td>${fmt(v)}</td>`;
+      if(key==='keterangan')return `<td>${v?`<span class="b ${String(v).replace(/\s/g,'')}">${esc(v)}</span>`:''}</td>`;
+      if(key==='denda')return `<td>${typeof v==='number'?'Rp'+v.toLocaleString('id-ID'):esc(v)}</td>`;
+      return `<td>${esc(v)}</td>`}).join('')+'</tr>'}).join('');
+  $('#sum').textContent=`${h} dari ${body.length} sudah terisi`+(start?` · Rapat mulai ${fmt(start)}`:' · Jam Rapat Dimulai tidak ditemukan');
+}
+async function scan(text){
+  const m=rows.slice(hdr+1).map((r,i)=>({r,n:hdr+2+i})).find(x=>{const id=idOf(x.r[ci.id]);return id.length>=8&&text.includes(id)});
+  if(!m)return st('NIM tidak ditemukan di data: '+text.slice(0,60),'err');
+  const nama=m.r[ci.nama];
+  if(m.r[ci['jam kehadiran']])return st(`${nama} sudah absen (${fmt(m.r[ci['jam kehadiran']])})`,'warn');
+  const now=new Date(),ser=(now.getTime()-now.getTimezoneOffset()*6e4)/864e5+25569;
+  const late=start&&ser>start,ket=late?'Terlambat':'Hadir';
+  const a=ci['jam kehadiran'],b=ci.keterangan;
+  await api(`/values/${encodeURIComponent(`'${$('#sheet').value}'!${col(a)}${m.n}:${col(b)}${m.n}`)}?valueInputOption=RAW`,
+    {method:'PUT',body:JSON.stringify({values:[[ser,ket]]})});
+  hit=m.n;await loadData();
+  st(`${nama} — ${ket}`,late?'warn':'ok');
+}
+$('#scan').addEventListener('keydown',async e=>{
+  if(e.key!=='Enter')return;e.preventDefault();
+  const t=e.target.value.trim();e.target.value='';if(!t)return;
+  try{await scan(t)}catch(err){st(err.message,'err')}
+});
+document.addEventListener('click',e=>{if(!e.target.closest('select,input,button,dialog'))$('#scan').focus()});
+$('#login').onclick=login;$('#ref').onclick=()=>loadData().catch(e=>st(e.message,'err'));
+$('#sheet').onchange=()=>loadData().catch(e=>st(e.message,'err'));
+$('#cfgb').onclick=()=>{$('#url').value=cfg.url||'';$('#cid').value=cfg.cid||'';$('#dlg').showModal()};
+$('#dlg').addEventListener('close',()=>{cfg.url=$('#url').value.trim();cfg.cid=$('#cid').value.trim();localStorage.cfg=JSON.stringify(cfg)});
+setInterval(()=>{if(token&&document.activeElement.id==='scan')loadData().catch(()=>{})},20000);
+</script></body></html>
